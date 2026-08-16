@@ -1,6 +1,5 @@
-fastapi==0.104.1
-uvicorn==0.24.0
-requests==2.31.0
-pycryptodome==3.19.0
-yt-dlp==2023.12.30
-python-multipart==0.0.6
+fastapi
+uvicorn
+requests
+yt-dlp>=2024.08.01
+pycryptodome
