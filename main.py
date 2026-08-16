@@ -1,6 +1,6 @@
 import base64
 import requests
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 import yt_dlp
@@ -41,8 +41,8 @@ def decrypt_saavn_url(encrypted_url: str) -> str:
     except Exception:
         return ""
 
-# 1. JioSaavn Fetcher (Instant Base64 Token Creation)
-def fetch_jiosaavn(query: str, limit: int = 7):
+# 1. JioSaavn Fetcher (Dynamic Domain)
+def fetch_jiosaavn(query: str, base_url: str, limit: int = 7):
     results = []
     url = f"https://www.jiosaavn.com/api.php?__call=search.getResults&_format=json&_marker=0&cc=in&includeMetaTags=1&q={query}&p=1&n={limit}"
     try:
@@ -57,11 +57,10 @@ def fetch_jiosaavn(query: str, limit: int = 7):
                 
                 if direct_cdn_url:
                     token = encode_safe(direct_cdn_url)
-                    play_url = f"http://127.0.0.1:8000/play?source=jiosaavn&token={token}"
+                    play_url = f"{base_url}/play?source=jiosaavn&token={token}"
                 else:
-                    # Fallback to YouTube Search if JioSaavn link is empty
                     search_term = requests.utils.quote(f"{title} {artist}")
-                    play_url = f"http://127.0.0.1:8000/play?source=spotify&query={search_term}"
+                    play_url = f"{base_url}/play?source=spotify&query={search_term}"
                 
                 results.append({
                     "id": item.get("id"),
@@ -74,8 +73,8 @@ def fetch_jiosaavn(query: str, limit: int = 7):
         pass
     return results
 
-# 2. YouTube Music Fetcher
-def fetch_ytmusic(query: str, limit: int = 7):
+# 2. YouTube Music Fetcher (Dynamic Domain)
+def fetch_ytmusic(query: str, base_url: str, limit: int = 7):
     results = []
     ydl_opts = {'quiet': True, 'extract_flat': True, 'skip_download': True}
     try:
@@ -91,14 +90,14 @@ def fetch_ytmusic(query: str, limit: int = 7):
                     "title": entry.get('title'),
                     "artist": entry.get('uploader', 'YouTube Music'),
                     "source": "YouTube Music",
-                    "play_url": f"http://127.0.0.1:8000/play?source=youtube&id={v_id}"
+                    "play_url": f"{base_url}/play?source=youtube&id={v_id}"
                 })
     except Exception:
         pass
     return results
 
-# 3. Spotify Fetcher
-def fetch_spotify(query: str, limit: int = 6):
+# 3. Spotify Fetcher (Dynamic Domain)
+def fetch_spotify(query: str, base_url: str, limit: int = 6):
     results = []
     try:
         token_res = requests.get("https://open.spotify.com/get_access_token", headers=HEADERS, timeout=5)
@@ -117,18 +116,21 @@ def fetch_spotify(query: str, limit: int = 6):
                         "title": title,
                         "artist": artists,
                         "source": "Spotify",
-                        "play_url": f"http://127.0.0.1:8000/play?source=spotify&query={search_term}"
+                        "play_url": f"{base_url}/play?source=spotify&query={search_term}"
                     })
     except Exception:
         pass
     return results
 
-# --- Aggregated Search Endpoint (20 Combined Results) ---
+# --- Aggregated Search Endpoint ---
 @app.get("/search")
-def search_all_sources(name: str):
-    saavn_results = fetch_jiosaavn(name, limit=7)
-    yt_results = fetch_ytmusic(name, limit=7)
-    spotify_results = fetch_spotify(name, limit=6)
+def search_all_sources(name: str, request: Request):
+    # Auto-detect Domain Name (Render or Localhost)
+    base_url = str(request.base_url).rstrip('/')
+    
+    saavn_results = fetch_jiosaavn(name, base_url, limit=7)
+    yt_results = fetch_ytmusic(name, base_url, limit=7)
+    spotify_results = fetch_spotify(name, base_url, limit=6)
     
     all_songs = saavn_results + yt_results + spotify_results
     return {
@@ -186,3 +188,4 @@ def play_audio(source: str, id: str = None, token: str = None, query: str = None
         raise HTTPException(status_code=500, detail=str(e))
 
     raise HTTPException(status_code=404, detail="Audio stream not found")
+
