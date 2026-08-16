@@ -1,17 +1,12 @@
-from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import StreamingResponse, JSONResponse
-from fastapi.middleware.cors import CORSMiddleware
-import requests
 import base64
-from Crypto.Cipher import DES
-import os
-import json
-from urllib.parse import quote
-import time
-from typing import Optional
+import requests
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import StreamingResponse
+from fastapi.middleware.cors import CORSMiddleware
 import yt_dlp
+from Crypto.Cipher import DES
 
-app = FastAPI(title="Music Stream API")
+app = FastAPI(title="Unified Music Stream API")
 
 app.add_middleware(
     CORSMiddleware,
@@ -21,7 +16,7 @@ app.add_middleware(
 )
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, Like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, Gecko) Chrome/120.0.0.0 Safari/537.36"
 }
 
 # --- Base64 URL Safe Encoders ---
@@ -46,12 +41,12 @@ def decrypt_saavn_url(encrypted_url: str) -> str:
     except Exception:
         return ""
 
-# 1. JioSaavn Fetcher
+# 1. JioSaavn Fetcher (Instant Base64 Token Creation)
 def fetch_jiosaavn(query: str, limit: int = 7):
     results = []
     url = f"https://www.jiosaavn.com/api.php?__call=search.getResults&_format=json&_marker=0&cc=in&includeMetaTags=1&q={query}&p=1&n={limit}"
     try:
-        res = requests.get(url, headers=HEADERS, timeout=8)
+        res = requests.get(url, headers=HEADERS, timeout=5)
         if res.status_code == 200:
             data = res.json().get("results", [])
             for item in data:
@@ -62,73 +57,28 @@ def fetch_jiosaavn(query: str, limit: int = 7):
                 
                 if direct_cdn_url:
                     token = encode_safe(direct_cdn_url)
-                    # Use Vercel URL if available
-                    base_url = os.getenv("VERCEL_URL", "https://your-domain.vercel.app")
-                    play_url = f"https://{base_url}/play?source=jiosaavn&token={token}"
+                    play_url = f"http://127.0.0.1:8000/play?source=jiosaavn&token={token}"
                 else:
-                    search_term = quote(f"{title} {artist}")
-                    base_url = os.getenv("VERCEL_URL", "https://your-domain.vercel.app")
-                    play_url = f"https://{base_url}/play?source=spotify&query={search_term}"
+                    # Fallback to YouTube Search if JioSaavn link is empty
+                    search_term = requests.utils.quote(f"{title} {artist}")
+                    play_url = f"http://127.0.0.1:8000/play?source=spotify&query={search_term}"
                 
                 results.append({
                     "id": item.get("id"),
                     "title": title,
                     "artist": artist,
                     "source": "JioSaavn",
-                    "play_url": play_url,
-                    "thumbnail": item.get("image", ""),
-                    "duration": item.get("duration", "")
+                    "play_url": play_url
                 })
-    except Exception as e:
-        print(f"JioSaavn error: {e}")
+    except Exception:
+        pass
     return results
 
-# 2. Spotify Fetcher
-def fetch_spotify(query: str, limit: int = 6):
-    results = []
-    try:
-        token_res = requests.get("https://open.spotify.com/get_access_token", headers=HEADERS, timeout=5)
-        if token_res.status_code == 200:
-            token_data = token_res.json()
-            token = token_data.get("accessToken")
-            if token:
-                headers = {"Authorization": f"Bearer {token}", **HEADERS}
-                res = requests.get(
-                    f"https://api.spotify.com/v1/search?q={query}&type=track&limit={limit}",
-                    headers=headers,
-                    timeout=5
-                )
-                if res.status_code == 200:
-                    tracks = res.json().get("tracks", {}).get("items", [])
-                    for track in tracks:
-                        artists = ", ".join([a.get("name") for a in track.get("artists", [])])
-                        title = track.get("name")
-                        search_term = quote(f"{title} {artists}")
-                        base_url = os.getenv("VERCEL_URL", "https://your-domain.vercel.app")
-                        
-                        results.append({
-                            "id": track.get("id"),
-                            "title": title,
-                            "artist": artists,
-                            "source": "Spotify",
-                            "play_url": f"https://{base_url}/play?source=spotify&query={search_term}",
-                            "thumbnail": track.get("album", {}).get("images", [{}])[0].get("url", ""),
-                            "duration": track.get("duration_ms", 0)
-                        })
-    except Exception as e:
-        print(f"Spotify error: {e}")
-    return results
-
-# 3. YouTube Music Fetcher
+# 2. YouTube Music Fetcher
 def fetch_ytmusic(query: str, limit: int = 7):
     results = []
+    ydl_opts = {'quiet': True, 'extract_flat': True, 'skip_download': True}
     try:
-        ydl_opts = {
-            'quiet': True,
-            'extract_flat': True,
-            'skip_download': True,
-            'no_warnings': True
-        }
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(f"ytsearch{limit}:{query} official audio", download=False)
             entries = info.get('entries', [])
@@ -136,65 +86,51 @@ def fetch_ytmusic(query: str, limit: int = 7):
                 if not entry:
                     continue
                 v_id = entry.get('id')
-                base_url = os.getenv("VERCEL_URL", "https://your-domain.vercel.app")
                 results.append({
                     "id": v_id,
-                    "title": entry.get('title', 'Unknown'),
+                    "title": entry.get('title'),
                     "artist": entry.get('uploader', 'YouTube Music'),
                     "source": "YouTube Music",
-                    "play_url": f"https://{base_url}/play?source=youtube&id={v_id}",
-                    "thumbnail": f"https://img.youtube.com/vi/{v_id}/hqdefault.jpg",
-                    "duration": entry.get('duration', 0)
+                    "play_url": f"http://127.0.0.1:8000/play?source=youtube&id={v_id}"
                 })
-    except Exception as e:
-        print(f"YouTube error: {e}")
-        # Fallback to Invidious API if yt-dlp fails
-        try:
-            invidious_instances = [
-                "https://invidious.io.lol",
-                "https://invidious.fdn.fr",
-                "https://inv.riverside.rocks"
-            ]
-            
-            for instance in invidious_instances:
-                try:
-                    res = requests.get(
-                        f"{instance}/api/v1/search?q={query}&type=video&limit={limit}",
-                        headers=HEADERS,
-                        timeout=5
-                    )
-                    if res.status_code == 200:
-                        videos = res.json()
-                        for video in videos[:limit]:
-                            if video.get("lengthSeconds", 0) > 0:
-                                video_id = video.get("videoId")
-                                base_url = os.getenv("VERCEL_URL", "https://your-domain.vercel.app")
-                                results.append({
-                                    "id": video_id,
-                                    "title": video.get("title", "Unknown"),
-                                    "artist": video.get("author", "YouTube Music"),
-                                    "source": "YouTube Music",
-                                    "play_url": f"https://{base_url}/play?source=youtube&id={video_id}",
-                                    "thumbnail": f"https://img.youtube.com/vi/{video_id}/hqdefault.jpg",
-                                    "duration": video.get("lengthSeconds", 0)
-                                })
-                        break
-                except:
-                    continue
-        except:
-            pass
+    except Exception:
+        pass
     return results
 
-# --- Aggregated Search Endpoint ---
+# 3. Spotify Fetcher
+def fetch_spotify(query: str, limit: int = 6):
+    results = []
+    try:
+        token_res = requests.get("https://open.spotify.com/get_access_token", headers=HEADERS, timeout=5)
+        if token_res.status_code == 200:
+            token = token_res.json().get("accessToken")
+            headers = {"Authorization": f"Bearer {token}", **HEADERS}
+            res = requests.get(f"https://api.spotify.com/v1/search?q={query}&type=track&limit={limit}", headers=headers, timeout=5)
+            if res.status_code == 200:
+                tracks = res.json().get("tracks", {}).get("items", [])
+                for track in tracks:
+                    artists = ", ".join([a.get("name") for a in track.get("artists", [])])
+                    title = track.get("name")
+                    search_term = requests.utils.quote(f"{title} {artists}")
+                    results.append({
+                        "id": track.get("id"),
+                        "title": title,
+                        "artist": artists,
+                        "source": "Spotify",
+                        "play_url": f"http://127.0.0.1:8000/play?source=spotify&query={search_term}"
+                    })
+    except Exception:
+        pass
+    return results
+
+# --- Aggregated Search Endpoint (20 Combined Results) ---
 @app.get("/search")
 def search_all_sources(name: str):
-    # Limit results to avoid timeout on Vercel
-    saavn_results = fetch_jiosaavn(name, limit=5)
-    yt_results = fetch_ytmusic(name, limit=5)
-    spotify_results = fetch_spotify(name, limit=5)
+    saavn_results = fetch_jiosaavn(name, limit=7)
+    yt_results = fetch_ytmusic(name, limit=7)
+    spotify_results = fetch_spotify(name, limit=6)
     
     all_songs = saavn_results + yt_results + spotify_results
-    
     return {
         "status": True,
         "query": name,
@@ -207,126 +143,46 @@ def search_all_sources(name: str):
         "songs": all_songs
     }
 
-# --- Streaming Proxy Endpoint ---
+# --- Bulletproof Streaming Proxy Endpoint ---
 @app.get("/play")
-def play_audio(
-    source: str,
-    id: Optional[str] = None,
-    token: Optional[str] = None,
-    query: Optional[str] = None
-):
+def play_audio(source: str, id: str = None, token: str = None, query: str = None):
+    # 1. JioSaavn Direct Proxy Stream via Token
+    if source == "jiosaavn" and token:
+        try:
+            stream_cdn_url = decode_safe(token)
+            req = requests.get(stream_cdn_url, headers=HEADERS, stream=True)
+            if req.status_code == 200:
+                return StreamingResponse(
+                    req.iter_content(chunk_size=1024 * 64),
+                    media_type="audio/mp4"
+                )
+        except Exception:
+            pass
+        raise HTTPException(status_code=400, detail="JioSaavn stream failed to decode")
+
+    # 2. YouTube Music / Spotify Stream Proxy
+    ydl_opts = {'format': 'bestaudio/best', 'quiet': True, 'skip_download': True}
     try:
-        # 1. JioSaavn Direct Proxy Stream via Token
-        if source == "jiosaavn" and token:
-            try:
-                stream_cdn_url = decode_safe(token)
-                req = requests.get(stream_cdn_url, headers=HEADERS, stream=True, timeout=10)
-                if req.status_code == 200:
-                    return StreamingResponse(
-                        req.iter_content(chunk_size=1024 * 64),
-                        media_type=req.headers.get("content-type", "audio/mp4")
-                    )
-            except Exception as e:
-                print(f"JioSaavn stream error: {e}")
-                raise HTTPException(status_code=400, detail="JioSaavn stream failed")
-        
-        # 2. YouTube Music Stream
-        elif source == "youtube" and id:
-            try:
-                ydl_opts = {
-                    'format': 'bestaudio/best',
-                    'quiet': True,
-                    'no_warnings': True,
-                    'extract_flat': False,
-                    'skip_download': True,
-                }
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            if source == "youtube" and id:
+                target = f"https://www.youtube.com/watch?v={id}"
+            elif query:
+                target = f"ytsearch1:{query} official audio"
+            else:
+                raise HTTPException(status_code=400, detail="Missing parameter")
                 
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    info = ydl.extract_info(f"https://www.youtube.com/watch?v={id}", download=False)
-                    stream_url = info.get('url')
-                    
-                    if stream_url:
-                        req = requests.get(stream_url, headers=HEADERS, stream=True, timeout=10)
-                        if req.status_code == 200:
-                            return StreamingResponse(
-                                req.iter_content(chunk_size=1024 * 64),
-                                media_type=req.headers.get("content-type", "audio/webm")
-                            )
-            except Exception as e:
-                print(f"YouTube stream error: {e}")
-                # Fallback to alternative source
-                try:
-                    alt_url = f"https://invidious.io.lol/api/v1/videos/{id}"
-                    alt_res = requests.get(alt_url, headers=HEADERS, timeout=5)
-                    if alt_res.status_code == 200:
-                        formats = alt_res.json().get("adaptiveFormats", [])
-                        for fmt in formats:
-                            if fmt.get("type", "").startswith("audio/"):
-                                stream_url = fmt.get("url")
-                                if stream_url:
-                                    req = requests.get(stream_url, headers=HEADERS, stream=True, timeout=10)
-                                    if req.status_code == 200:
-                                        return StreamingResponse(
-                                            req.iter_content(chunk_size=1024 * 64),
-                                            media_type=req.headers.get("content-type", "audio/webm")
-                                        )
-                except:
-                    pass
+            info = ydl.extract_info(target, download=False)
+            if 'entries' in info and len(info['entries']) > 0:
+                info = info['entries'][0]
                 
-                raise HTTPException(status_code=404, detail="YouTube stream not found")
-        
-        # 3. Spotify Search Fallback
-        elif source == "spotify" and query:
-            try:
-                ydl_opts = {
-                    'format': 'bestaudio/best',
-                    'quiet': True,
-                    'no_warnings': True,
-                    'extract_flat': False,
-                    'skip_download': True,
-                }
-                
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    info = ydl.extract_info(f"ytsearch1:{query}", download=False)
-                    if 'entries' in info and len(info['entries']) > 0:
-                        video = info['entries'][0]
-                        stream_url = video.get('url')
-                        if stream_url:
-                            req = requests.get(stream_url, headers=HEADERS, stream=True, timeout=10)
-                            if req.status_code == 200:
-                                return StreamingResponse(
-                                    req.iter_content(chunk_size=1024 * 64),
-                                    media_type=req.headers.get("content-type", "audio/webm")
-                                )
-            except Exception as e:
-                print(f"Spotify stream error: {e}")
-                raise HTTPException(status_code=404, detail="Stream not found")
-        
-        raise HTTPException(status_code=400, detail="Invalid parameters")
-    
+            stream_url = info.get('url')
+            if stream_url:
+                req = requests.get(stream_url, headers=HEADERS, stream=True)
+                return StreamingResponse(
+                    req.iter_content(chunk_size=1024 * 64),
+                    media_type="audio/webm"
+                )
     except Exception as e:
-        print(f"Play error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-# Health check endpoint
-@app.get("/health")
-def health_check():
-    return {"status": "healthy", "timestamp": time.time()}
-
-# Root endpoint
-@app.get("/")
-def root():
-    return {
-        "message": "Music Stream API",
-        "endpoints": {
-            "search": "/search?name=query",
-            "play": "/play?source=jiosaavn&token=...",
-            "health": "/health"
-        },
-        "usage": {
-            "search": "GET /search?name=song_name",
-            "play_jiosaavn": "GET /play?source=jiosaavn&token=encoded_token",
-            "play_youtube": "GET /play?source=youtube&id=video_id",
-            "play_spotify": "GET /play?source=spotify&query=song_name"
-        }
-    }
+    raise HTTPException(status_code=404, detail="Audio stream not found")
