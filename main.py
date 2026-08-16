@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import yt_dlp
 from Crypto.Cipher import DES
 
-app = FastAPI(title="Unified Music Stream API", version="2.0")
+app = FastAPI(title="Unified Music Stream API", version="3.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -41,7 +41,7 @@ def decrypt_saavn_url(encrypted_url: str) -> str:
     except Exception:
         return ""
 
-# 1. JioSaavn Fetcher (Dynamic Base URL)
+# 1. JioSaavn Fetcher
 def fetch_jiosaavn(query: str, base_url: str, limit: int = 7):
     results = []
     url = f"https://www.jiosaavn.com/api.php?__call=search.getResults&_format=json&_marker=0&cc=in&includeMetaTags=1&q={query}&p=1&n={limit}"
@@ -76,7 +76,16 @@ def fetch_jiosaavn(query: str, base_url: str, limit: int = 7):
 # 2. YouTube Music Fetcher
 def fetch_ytmusic(query: str, base_url: str, limit: int = 7):
     results = []
-    ydl_opts = {'quiet': True, 'extract_flat': True, 'skip_download': True}
+    ydl_opts = {
+        'quiet': True,
+        'extract_flat': True,
+        'skip_download': True,
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['tv_embedded', 'web_embedded', 'mweb']
+            }
+        }
+    }
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(f"ytsearch{limit}:{query} official audio", download=False)
@@ -105,6 +114,104 @@ def fetch_spotify(query: str, base_url: str, limit: int = 6):
             token = token_res.json().get("accessToken")
             headers = {"Authorization": f"Bearer {token}", **HEADERS}
             res = requests.get(f"https://api.spotify.com/v1/search?q={query}&type=track&limit={limit}", headers=headers, timeout=5)
+            if res.status_code == 200:
+                tracks = res.json().get("tracks", {}).get("items", [])
+                for track in tracks:
+                    artists = ", ".join([a.get("name") for a in track.get("artists", [])])
+                    title = track.get("name")
+                    search_term = requests.utils.quote(f"{title} {artists}")
+                    results.append({
+                        "id": track.get("id"),
+                        "title": title,
+                        "artist": artists,
+                        "source": "Spotify",
+                        "play_url": f"{base_url}/play?source=spotify&query={search_term}"
+                    })
+    except Exception:
+        pass
+    return results
+
+# --- Root Endpoint ---
+@app.get("/")
+def home():
+    return {"status": True, "message": "Unified Music Stream API Active"}
+
+# --- Search Endpoint ---
+@app.get("/search")
+def search_all_sources(name: str, request: Request):
+    base_url = str(request.base_url).rstrip('/')
+    
+    saavn_results = fetch_jiosaavn(name, base_url, limit=7)
+    yt_results = fetch_ytmusic(name, base_url, limit=7)
+    spotify_results = fetch_spotify(name, base_url, limit=6)
+    
+    all_songs = saavn_results + yt_results + spotify_results
+    return {
+        "status": True,
+        "query": name,
+        "total_results": len(all_songs),
+        "breakdown": {
+            "jiosaavn": len(saavn_results),
+            "youtube_music": len(yt_results),
+            "spotify": len(spotify_results)
+        },
+        "songs": all_songs
+    }
+
+# --- Streaming Endpoint (Bot Bypass Enabled) ---
+@app.get("/play")
+def play_audio(source: str, id: str = None, token: str = None, query: str = None):
+    # 1. JioSaavn Stream
+    if source == "jiosaavn" and token:
+        try:
+            stream_cdn_url = decode_safe(token)
+            req = requests.get(stream_cdn_url, headers=HEADERS, stream=True)
+            if req.status_code == 200:
+                return StreamingResponse(
+                    req.iter_content(chunk_size=1024 * 64),
+                    media_type="audio/mp4"
+                )
+        except Exception:
+            pass
+        raise HTTPException(status_code=400, detail="JioSaavn stream failed")
+
+    # 2. YouTube Music / Spotify Stream (TV/Web Embedded Bypass)
+    ydl_opts = {
+        'format': 'bestaudio/best',
+        'quiet': True,
+        'skip_download': True,
+        'nocheckcertificate': True,
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['tv_embedded', 'web_embedded', 'mweb', 'android']
+            }
+        }
+    }
+    
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            if source == "youtube" and id:
+                target = f"https://www.youtube.com/watch?v={id}"
+            elif query:
+                target = f"ytsearch1:{query} official audio"
+            else:
+                raise HTTPException(status_code=400, detail="Missing parameter")
+                
+            info = ydl.extract_info(target, download=False)
+            if 'entries' in info and len(info['entries']) > 0:
+                info = info['entries'][0]
+                
+            stream_url = info.get('url')
+            if stream_url:
+                req = requests.get(stream_url, headers=HEADERS, stream=True)
+                return StreamingResponse(
+                    req.iter_content(chunk_size=1024 * 64),
+                    media_type="audio/webm"
+                )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    raise HTTPException(status_code=404, detail="Audio stream not found")
             if res.status_code == 200:
                 tracks = res.json().get("tracks", {}).get("items", [])
                 for track in tracks:
