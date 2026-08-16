@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import yt_dlp
 from Crypto.Cipher import DES
 
-app = FastAPI(title="Unified Music Stream API")
+app = FastAPI(title="Unified Music Stream API", version="2.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -16,10 +16,10 @@ app.add_middleware(
 )
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, Gecko) Chrome/120.0.0.0 Safari/537.36"
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 }
 
-# --- Base64 URL Safe Encoders ---
+# --- Base64 Encoders ---
 def encode_safe(text: str) -> str:
     return base64.urlsafe_b64encode(text.encode('utf-8')).decode('utf-8')
 
@@ -41,7 +41,7 @@ def decrypt_saavn_url(encrypted_url: str) -> str:
     except Exception:
         return ""
 
-# 1. JioSaavn Fetcher (Dynamic Domain)
+# 1. JioSaavn Fetcher (Dynamic Base URL)
 def fetch_jiosaavn(query: str, base_url: str, limit: int = 7):
     results = []
     url = f"https://www.jiosaavn.com/api.php?__call=search.getResults&_format=json&_marker=0&cc=in&includeMetaTags=1&q={query}&p=1&n={limit}"
@@ -73,7 +73,7 @@ def fetch_jiosaavn(query: str, base_url: str, limit: int = 7):
         pass
     return results
 
-# 2. YouTube Music Fetcher (Dynamic Domain)
+# 2. YouTube Music Fetcher
 def fetch_ytmusic(query: str, base_url: str, limit: int = 7):
     results = []
     ydl_opts = {'quiet': True, 'extract_flat': True, 'skip_download': True}
@@ -96,7 +96,7 @@ def fetch_ytmusic(query: str, base_url: str, limit: int = 7):
         pass
     return results
 
-# 3. Spotify Fetcher (Dynamic Domain)
+# 3. Spotify Fetcher
 def fetch_spotify(query: str, base_url: str, limit: int = 6):
     results = []
     try:
@@ -122,10 +122,15 @@ def fetch_spotify(query: str, base_url: str, limit: int = 6):
         pass
     return results
 
+# --- Root Endpoint ---
+@app.get("/")
+def home():
+    return {"status": True, "message": "Unified Music Stream API is Active"}
+
 # --- Aggregated Search Endpoint ---
 @app.get("/search")
 def search_all_sources(name: str, request: Request):
-    # Auto-detect Domain Name (Render or Localhost)
+    # Auto-detect Domain (Render vs Localhost)
     base_url = str(request.base_url).rstrip('/')
     
     saavn_results = fetch_jiosaavn(name, base_url, limit=7)
@@ -148,7 +153,7 @@ def search_all_sources(name: str, request: Request):
 # --- Bulletproof Streaming Proxy Endpoint ---
 @app.get("/play")
 def play_audio(source: str, id: str = None, token: str = None, query: str = None):
-    # 1. JioSaavn Direct Proxy Stream via Token
+    # 1. JioSaavn Direct Stream
     if source == "jiosaavn" and token:
         try:
             stream_cdn_url = decode_safe(token)
@@ -162,8 +167,19 @@ def play_audio(source: str, id: str = None, token: str = None, query: str = None
             pass
         raise HTTPException(status_code=400, detail="JioSaavn stream failed to decode")
 
-    # 2. YouTube Music / Spotify Stream Proxy
-    ydl_opts = {'format': 'bestaudio/best', 'quiet': True, 'skip_download': True}
+    # 2. YouTube Music / Spotify Stream Proxy (Bypass Bot Checks)
+    ydl_opts = {
+        'format': 'bestaudio/best',
+        'quiet': True,
+        'skip_download': True,
+        'nocheckcertificate': True,
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['mweb', 'android', 'ios']
+            }
+        }
+    }
+    
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             if source == "youtube" and id:
@@ -188,4 +204,3 @@ def play_audio(source: str, id: str = None, token: str = None, query: str = None
         raise HTTPException(status_code=500, detail=str(e))
 
     raise HTTPException(status_code=404, detail="Audio stream not found")
-
